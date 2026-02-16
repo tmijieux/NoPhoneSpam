@@ -9,30 +9,36 @@
 package at.bitfire.nophonespam;
 
 import android.Manifest;
-import android.app.AlertDialog;
-import android.app.Dialog;
-import android.app.LoaderManager;
-import android.content.AsyncTaskLoader;
+
+import androidx.activity.result.ActivityResult;
+import androidx.activity.result.ActivityResultCallback;
+import androidx.annotation.Nullable;
+import androidx.loader.app.LoaderManager;
+import androidx.loader.content.AsyncTaskLoader;
+
+import android.app.role.RoleManager;
 import android.content.ContentValues;
 import android.content.Context;
-import android.content.DialogInterface;
 import android.content.Intent;
-import android.content.Loader;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.database.DatabaseUtils;
 import android.database.sqlite.SQLiteDatabase;
 import android.net.Uri;
-import android.os.AsyncTask;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Environment;
-import android.support.annotation.NonNull;
-import android.support.design.widget.CoordinatorLayout;
-import android.support.design.widget.Snackbar;
-import android.support.v4.app.ActivityCompat;
-import android.support.v4.content.ContextCompat;
-import android.support.v7.app.AppCompatActivity;
+
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.annotation.NonNull;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.coordinatorlayout.widget.CoordinatorLayout;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+import androidx.loader.content.Loader;
+
+import android.provider.OpenableColumns;
+import android.util.Log;
 import android.util.SparseBooleanArray;
 import android.view.ActionMode;
 import android.view.Menu;
@@ -46,8 +52,11 @@ import android.widget.ListView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.io.File;
-import java.io.FilenameFilter;
+import com.google.android.material.snackbar.Snackbar;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -61,28 +70,101 @@ import at.bitfire.nophonespam.model.BlockingModes;
 import at.bitfire.nophonespam.model.DbHelper;
 import at.bitfire.nophonespam.model.Number;
 
-public class BlacklistActivity extends AppCompatActivity implements LoaderManager.LoaderCallbacks<Set<Number>>, AdapterView.OnItemClickListener {
 
+
+
+
+public class BlacklistActivity
+        extends AppCompatActivity
+        implements LoaderManager.LoaderCallbacks<Set<Number>>,  AdapterView.OnItemClickListener
+{
     protected Settings settings;
     CoordinatorLayout coordinatorLayout;
 
     ListView list;
     ArrayAdapter<Number> adapter;
 
+    private static final int REQUEST_PERMISSION_CODE=1234;
 
-    protected String[] fileList;
-    protected static final File basePath = Environment.getExternalStorageDirectory();
-    protected static final int DIALOG_LOAD_FILE = 1000;
+    public static Context AppContext;
+
+    public String queryName(Uri uri){
+        try (Cursor returnCursor =
+            getContentResolver().query(uri, null, null, null, null)) {
+            if (returnCursor == null){
+                return null;
+            }
+            int nameIndex = returnCursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+            returnCursor.moveToFirst();
+            return returnCursor.getString(nameIndex);
+        }
+    }
+
+    ActivityResultLauncher<Intent> requestRole = registerForActivityResult(
+        new ActivityResultContracts.StartActivityForResult(),
+        activityResult -> {
+            if ( activityResult.getResultCode() == RESULT_OK){
+                Log.d("my-debug","got role of ScreenCalling!");
+            } else {
+                Log.d("my-debug","role of ScreenCalling refused!");
+            }
+        }
+    );
+
+
+
+    public void requestCallScreeningRole() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            RoleManager roleManager = (RoleManager) getSystemService(ROLE_SERVICE);
+            if (!roleManager.isRoleHeld(RoleManager.ROLE_CALL_SCREENING)){
+                Intent intent = roleManager.createRequestRoleIntent(RoleManager.ROLE_CALL_SCREENING);
+                requestRole.launch(intent);
+            }
+        }
+    }
+
+    ActivityResultLauncher<String> storeFile = registerForActivityResult(
+        new BlacklistFile.CreateBlackListFile(),
+        uri -> {
+            try {
+                if (uri == null){
+                    return;
+                }
+                Log.d("my-debug", "uri="+ uri);
+                OutputStream stream = getContentResolver().openOutputStream(uri);
+                if (stream == null){
+                    return;
+                }
+                List<Number> numbers = new LinkedList<>();
+                for (int i = 0; i < adapter.getCount(); i++) {
+                    numbers.add(adapter.getItem(i));
+                }
+
+                BlacklistFile.storeToOutput(numbers, stream);
+                // if we don't have permission, bail immediately; failure message is already displayed
+
+                Toast.makeText(
+                    getApplicationContext(),
+                    getResources().getText(R.string.blacklist_exported_to) + " " + queryName(uri),
+                    Toast.LENGTH_LONG
+                ).show();
+            } catch (IOException exception) {
+                Log.e("my-debug", "error in catch blacklist file store!!!!");
+            }
+        });
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+
+        AppContext = getApplicationContext();
+
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_blacklist);
 
         settings = new Settings(this);
-        coordinatorLayout = (CoordinatorLayout) findViewById(R.id.coordinatorLayout);
+        coordinatorLayout = findViewById(R.id.coordinatorLayout);
 
-        list = (ListView)findViewById(R.id.numbers);
+        list = findViewById(R.id.numbers);
         list.setAdapter(adapter = new NumberAdapter(this));
         list.setOnItemClickListener(this);
 
@@ -105,11 +187,10 @@ public class BlacklistActivity extends AppCompatActivity implements LoaderManage
 
             @Override
             public boolean onActionItemClicked(ActionMode actionMode, MenuItem menuItem) {
-                switch (menuItem.getItemId()) {
-                    case R.id.delete:
-                        deleteSelectedNumbers();
-                        actionMode.finish();
-                        return true;
+                if (menuItem.getItemId() == R.id.delete) {
+                    deleteSelectedNumbers();
+                    actionMode.finish();
+                    return true;
                 }
                 return false;
             }
@@ -120,24 +201,23 @@ public class BlacklistActivity extends AppCompatActivity implements LoaderManage
         });
 
         requestPermissions();
+        requestCallScreeningRole();
 
-        getLoaderManager().initLoader(0, null, this);
+        LoaderManager.getInstance(this).initLoader(0, null, this);
     }
 
     protected void requestPermissions() {
         List<String> requiredPermissions = new ArrayList<>();
         requiredPermissions.add(Manifest.permission.CALL_PHONE);
         requiredPermissions.add(Manifest.permission.READ_PHONE_STATE);
-        requiredPermissions.add(Manifest.permission.WRITE_EXTERNAL_STORAGE);
         requiredPermissions.add(Manifest.permission.READ_CONTACTS);
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
-            requiredPermissions.add(Manifest.permission.READ_CALL_LOG);
-        }
+        requiredPermissions.add(Manifest.permission.READ_CALL_LOG);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             requiredPermissions.add(Manifest.permission.ANSWER_PHONE_CALLS);
         }
-
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            requiredPermissions.add(Manifest.permission.POST_NOTIFICATIONS);
+        }
         List<String> missingPermissions = new ArrayList<>();
 
         for (String permission : requiredPermissions) {
@@ -149,7 +229,7 @@ public class BlacklistActivity extends AppCompatActivity implements LoaderManage
 
         if (!missingPermissions.isEmpty()) {
             ActivityCompat.requestPermissions(this,
-                    missingPermissions.toArray(new String[0]), 0);
+                    missingPermissions.toArray(new String[0]), REQUEST_PERMISSION_CODE);
         }
     }
 
@@ -157,56 +237,57 @@ public class BlacklistActivity extends AppCompatActivity implements LoaderManage
         final List<String> numbers = new LinkedList<>();
 
         SparseBooleanArray checked = list.getCheckedItemPositions();
-        for (int i = checked.size() - 1; i >= 0; i--)
+        for (int i = checked.size() - 1; i >= 0; i--) {
             if (checked.valueAt(i)) {
                 int position = checked.keyAt(i);
-                numbers.add(adapter.getItem(position).number);
-            }
-
-        new AsyncTask<Void, Void, Void>() {
-            @Override
-            protected Void doInBackground(Void... params) {
-                DbHelper dbHelper = new DbHelper(BlacklistActivity.this);
-                try {
-                    SQLiteDatabase db = dbHelper.getWritableDatabase();
-                    for (String number : numbers)
-                        db.delete(Number._TABLE, Number.NUMBER + "=?", new String[] { number });
-                } finally {
-                    dbHelper.close();
+                Number n = adapter.getItem(position);
+                if (n == null){
+                    continue;
                 }
-
-                getLoaderManager().restartLoader(0, null, BlacklistActivity.this);
-                return null;
+                numbers.add(n.number);
             }
-        }.execute();
+        }
+
+        try (DbHelper dbHelper = new DbHelper(BlacklistActivity.this)) {
+            SQLiteDatabase db = dbHelper.getWritableDatabase();
+            for (String number : numbers) {
+                db.delete(Number._TABLE, Number.NUMBER + "=?", new String[]{number});
+            }
+        }
+
+        LoaderManager.getInstance(this).restartLoader(0, null, BlacklistActivity.this);
     }
 
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
 
-        boolean ok = true;
-        if (grantResults.length != 0) {
-            for (int result : grantResults) {
-                if (result != PackageManager.PERMISSION_GRANTED) {
-                    ok = false;
-                    break;
-                }
-            }
-        } else {
-            // treat cancellation as failure
-            ok = false;
-        }
+        if (requestCode == REQUEST_PERMISSION_CODE){
+            boolean ok = true;
+            if (grantResults.length != 0) {
+                int i = 0;
+                Log.d("my-debug", "len="+grantResults.length);
+                for (int result : grantResults) {
+                    Log.d("my-debug","permission="+permissions[i]+" grantResult="+(result==PackageManager.PERMISSION_GRANTED)+" r="+result);
+                    if (result != PackageManager.PERMISSION_GRANTED) {
 
-        if (!ok)
-            Snackbar.make(coordinatorLayout, R.string.blacklist_permissions_required, Snackbar.LENGTH_INDEFINITE)
-                    .setAction(R.string.blacklist_request_permissions, new View.OnClickListener() {
-                        @Override
-                        public void onClick(View view) {
-                            requestPermissions();
-                        }
-                    })
+                        ok = false;
+                        break;
+                    }
+                    i = i +1;
+                }
+            } else {
+                // treat cancellation as failure
+                ok = false;
+            }
+
+            if (!ok) {
+                Snackbar
+                    .make(coordinatorLayout, R.string.blacklist_permissions_required, Snackbar.LENGTH_INDEFINITE)
+                    .setAction(R.string.blacklist_request_permissions, view -> requestPermissions())
                     .show();
+            }
+        }
     }
 
     @Override
@@ -256,112 +337,79 @@ public class BlacklistActivity extends AppCompatActivity implements LoaderManage
 
         boolean toggleCheckState = true;
 
-        switch (item.getItemId()) {
-            case R.id.allow_all:
-                settings.setCallBlockingMode(BlockingModes.ALLOW_ALL);
-                break;
-            case R.id.allow_only_contacts:
-                settings.setCallBlockingMode(BlockingModes.ALLOW_CONTACTS);
-                break;
-            case R.id.allow_only_list:
-                settings.setCallBlockingMode(BlockingModes.ALLOW_ONLY_LIST_CALLS);
-                break;
-            case R.id.block_list:
-                settings.setCallBlockingMode(BlockingModes.BLOCK_LIST);
-                break;
-            case R.id.block_all:
-                settings.setCallBlockingMode(BlockingModes.BLOCK_ALL);
-                break;
-            default:
-                toggleCheckState = false;
+        int itemId = item.getItemId();
+        if (itemId == R.id.allow_all) {
+            settings.setCallBlockingMode(BlockingModes.ALLOW_ALL);
+        } else if (itemId == R.id.allow_only_contacts) {
+            settings.setCallBlockingMode(BlockingModes.ALLOW_CONTACTS);
+        } else if (itemId == R.id.allow_only_list) {
+            settings.setCallBlockingMode(BlockingModes.ALLOW_ONLY_LIST_CALLS);
+        } else if (itemId == R.id.block_list) {
+            settings.setCallBlockingMode(BlockingModes.BLOCK_LIST);
+        } else if (itemId == R.id.block_all) {
+            settings.setCallBlockingMode(BlockingModes.BLOCK_ALL);
+        } else {
+            toggleCheckState = false;
         }
 
-        if(toggleCheckState){
-
-            if (item.isChecked()) item.setChecked(false);
-            else item.setChecked(true);
+        if (toggleCheckState) {
+            boolean wasChecked = item.isChecked();
+            item.setChecked(!wasChecked);
             return true;
         }
         return super.onOptionsItemSelected(item);
     }
 
-
     public void onImportBlacklist(MenuItem item) {
-        showDialog(DIALOG_LOAD_FILE);
+        loadFile.launch(new String[]{"text/plain"});
     }
 
-    public Dialog onCreateDialog(int id) {
-        Dialog dialog;
-        AlertDialog.Builder builder = new AlertDialog.Builder(this);
-
-        switch(id) {
-        case DIALOG_LOAD_FILE:
-
-            final int lastDot = BlacklistFile.DEFAULT_FILENAME.lastIndexOf(".");
-            final String ext = BlacklistFile.DEFAULT_FILENAME.substring(lastDot);
-            FilenameFilter filter = new FilenameFilter() {
-                @Override
-                public boolean accept(File dir, String filename) {
-                    return filename.endsWith(ext);
+    ActivityResultLauncher<String[]> loadFile = registerForActivityResult(
+        new ActivityResultContracts.OpenDocument(),
+        uri -> {
+            if (uri == null) { return; }
+            try {
+                InputStream stream = getContentResolver().openInputStream(uri);
+                if (stream == null){
+                    Log.e("my-debug", "error in loading file");
+                    return;
                 }
-            };
+                commitBlacklist(stream);
+                stream.close();
+            } catch (IOException e) {
+                Log.e("my-debug", "error in loading file");
+            }
+            Log.d("my-debug", "uri="+ uri);
+        });
 
-            fileList = basePath.list(filter);
-
-            builder.setTitle(R.string.blacklist_import);
-            builder.setItems(fileList, new DialogInterface.OnClickListener() {
-                public void onClick(DialogInterface dialog, int which) {
-                    commitBlacklist(new BlacklistFile(basePath, fileList[which]));
-                }
-            });
-            break;
-        }
-
-        dialog = builder.show();
-        return dialog;
-    }
-
-    public void commitBlacklist(@NonNull BlacklistFile blacklist) {
-        DbHelper dbHelper = new DbHelper(BlacklistActivity.this);
-        try {
+    public void commitBlacklist(@NonNull InputStream stream) {
+        try (DbHelper dbHelper = new DbHelper(BlacklistActivity.this)) {
             SQLiteDatabase db = dbHelper.getWritableDatabase();
 
             ContentValues values;
-            Boolean exists;
-            for (Number number : blacklist.load()) {
+            boolean exists;
+            for (Number number : BlacklistFile.load(stream)) {
 
                 values = new ContentValues(4);
                 values.put(Number.NAME, number.name);
                 values.put(Number.NUMBER, Number.wildcardsViewToDb(number.number));
 
-                exists = db.query(Number._TABLE, null, Number.NUMBER + "=?", new String[]{number.number}, null, null, null).moveToNext();
-                if (exists)
-                    db.update(Number._TABLE, values, Number.NUMBER + "=?", new String[]{number.number});
-                else
-                    db.insert(Number._TABLE, null, values);
+                try (Cursor cursor = db.query(Number._TABLE, null, Number.NUMBER + "=?", new String[]{number.number}, null, null, null)) {
+                    exists = cursor.moveToNext();
+                    if (exists) {
+                        db.update(Number._TABLE, values, Number.NUMBER + "=?", new String[]{number.number});
+                    } else {
+                        db.insert(Number._TABLE, null, values);
+                    }
+                }
             }
-        } finally {
-            dbHelper.close();
         }
 
-        getLoaderManager().restartLoader(0, null, BlacklistActivity.this);
-        return;
+        LoaderManager.getInstance(this).restartLoader(0, null, BlacklistActivity.this);
     }
 
     public void onExportBlacklist(MenuItem item) {
-        BlacklistFile f = new BlacklistFile(basePath, BlacklistFile.DEFAULT_FILENAME);
-
-        List<Number> numbers = new LinkedList<>();
-        for (int i = 0; i < adapter.getCount(); i++)
-            numbers.add(adapter.getItem(i));
-
-        f.store(numbers, this);
-
-        Toast.makeText(
-                getApplicationContext(),
-                getResources().getText(R.string.blacklist_exported_to) + " " + BlacklistFile.DEFAULT_FILENAME,
-                Toast.LENGTH_LONG
-        ).show();
+        storeFile.launch(BlacklistFile.DEFAULT_FILENAME);
     }
 
     public void onAbout(MenuItem item) {
@@ -373,22 +421,23 @@ public class BlacklistActivity extends AppCompatActivity implements LoaderManage
     }
 
 
+
+    @NonNull
     @Override
-    public Loader<Set<Number>> onCreateLoader(int i, Bundle bundle) {
+    public Loader<Set<Number>> onCreateLoader(int id, @Nullable Bundle args) {
         return new NumberLoader(this);
     }
 
     @Override
-    public void onLoadFinished(Loader<Set<Number>> loader, Set<Number> numbers) {
+    public void onLoadFinished(@NonNull androidx.loader.content.Loader<Set<Number>> loader, Set<Number> numbers) {
         adapter.clear();
         adapter.addAll(numbers);
     }
 
     @Override
-    public void onLoaderReset(Loader<Set<Number>> loader) {
+    public void onLoaderReset(@NonNull androidx.loader.content.Loader<Set<Number>> loader) {
         adapter.clear();
     }
-
 
     private static class NumberAdapter extends ArrayAdapter<Number> {
 
@@ -396,26 +445,32 @@ public class BlacklistActivity extends AppCompatActivity implements LoaderManage
             super(context, R.layout.blacklist_item);
         }
 
+        @NonNull
         @Override
-        public View getView(int position, View view, ViewGroup parent) {
-            if (view == null)
+        public View getView(int position, View view, @NonNull ViewGroup parent) {
+            if (view == null) {
                 view = View.inflate(getContext(), R.layout.blacklist_item, null);
+            }
 
             Number number = getItem(position);
+            if (number == null){
+                return view;
+            }
 
-            TextView tv = (TextView)view.findViewById(R.id.number);
+            TextView tv = view.findViewById(R.id.number);
             tv.setText(Number.wildcardsDbToView(number.number));
 
-            tv = (TextView)view.findViewById(R.id.name);
+            tv = view.findViewById(R.id.name);
             tv.setText(number.name);
 
-            tv = (TextView)view.findViewById(R.id.stats);
+            tv = view.findViewById(R.id.stats);
             if (number.lastCall != null) {
                 tv.setVisibility(View.VISIBLE);
                 tv.setText(getContext().getResources().getQuantityString(R.plurals.blacklist_call_details, number.timesCalled,
                         number.timesCalled, SimpleDateFormat.getDateTimeInstance().format(new Date(number.lastCall))));
-            } else
+            } else {
                 tv.setVisibility(View.GONE);
+            }
 
             return view;
         }
@@ -425,6 +480,9 @@ public class BlacklistActivity extends AppCompatActivity implements LoaderManage
     @Override
     public void onItemClick(AdapterView<?> adapterView, View view, int position, long id) {
         Number number = adapter.getItem(position);
+        if (number == null){
+            return;
+        }
 
         Intent intent = new Intent(this, EditNumberActivity.class);
         intent.putExtra(EditNumberActivity.EXTRA_NUMBER, number.number);
@@ -432,7 +490,9 @@ public class BlacklistActivity extends AppCompatActivity implements LoaderManage
     }
 
 
-    protected static class NumberLoader extends AsyncTaskLoader<Set<Number>> implements BlacklistObserver.Observer {
+    protected static class NumberLoader
+        extends AsyncTaskLoader<Set<Number>>
+        implements BlacklistObserver.Observer {
 
         public NumberLoader(Context context) {
             super(context);
@@ -445,8 +505,7 @@ public class BlacklistActivity extends AppCompatActivity implements LoaderManage
 
         @Override
         public Set<Number> loadInBackground() {
-            DbHelper dbHelper = new DbHelper(getContext());
-            try {
+            try (DbHelper dbHelper = new DbHelper(getContext())) {
                 SQLiteDatabase db = dbHelper.getReadableDatabase();
 
                 Set<Number> numbers = new LinkedHashSet<>();
@@ -459,8 +518,6 @@ public class BlacklistActivity extends AppCompatActivity implements LoaderManage
                 c.close();
 
                 return numbers;
-            } finally {
-                dbHelper.close();
             }
         }
 
@@ -473,7 +530,5 @@ public class BlacklistActivity extends AppCompatActivity implements LoaderManage
         protected void onStopLoading() {
             BlacklistObserver.removeObserver(this);
         }
-
     }
-
 }

@@ -1,0 +1,43 @@
+package at.bitfire.nophonespam;
+
+import android.content.Context;
+import android.os.Build;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.RequiresApi;
+
+import android.telecom.Call;
+import android.telecom.CallScreeningService;
+import android.util.Log;
+
+@RequiresApi(api = Build.VERSION_CODES.N)
+public class MyCallScreeningService extends CallScreeningService {
+
+
+    @Override
+    public void onScreenCall(@NonNull Call.Details callDetails) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q){
+            return;
+        }
+        if (callDetails.getCallDirection() == Call.Details.DIRECTION_OUTGOING) {
+            return;
+        }
+        String incomingNumber = callDetails.getHandle().getSchemeSpecificPart();
+        Context context = getApplicationContext();
+        CallReceiver.CallOutcome outcome = CallReceiver.handlingRing(context, incomingNumber);
+
+
+        CallResponse response = new CallResponse.Builder()
+            .setRejectCall(outcome.rejected)
+            .setDisallowCall(outcome.rejected)
+            .setSilenceCall(false)
+            .setSkipCallLog(false)
+            .setSkipNotification(false)
+            .build();
+        Log.d("my-debug", "responding to call!="+incomingNumber + " rejected="+outcome.rejected);
+        respondToCall(callDetails, response);
+        if (outcome.rejected){
+            CallReceiver.notifyOfRejection(context, outcome.reason, outcome.number);
+        }
+    }
+}

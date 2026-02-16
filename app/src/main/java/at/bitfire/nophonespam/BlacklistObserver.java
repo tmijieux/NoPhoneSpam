@@ -18,14 +18,17 @@ public class BlacklistObserver {
 
     public static void addObserver(Observer observer, boolean immediate) {
         observers.add(new WeakReference<Observer>(observer));
-        if (immediate)
+        if (immediate) {
             observer.onBlacklistUpdate();
+            }
     }
 
     public static void removeObserver(Observer observer) {
-        for (WeakReference<Observer> ref : observers)
-            if (ref.get() == observer)
+        for (WeakReference<Observer> ref : observers){
+            if (ref.get() == observer) {
                 observers.remove(observer);
+            }
+        }
     }
 
     public static void notifyUpdated() {
@@ -37,10 +40,7 @@ public class BlacklistObserver {
     }
 
 
-    interface Observer {
-
+    public interface Observer {
         void onBlacklistUpdate();
-
     }
-
 }
