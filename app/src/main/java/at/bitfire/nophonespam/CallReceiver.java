@@ -50,6 +50,7 @@ public class CallReceiver extends BroadcastReceiver {
     private static final String TAG = "NoPhoneSpam";
     private static final int NOTIFY_REJECTED = 0;
     private static boolean AlreadyOnCall = false;
+    private static int numberlessRingCount = 0;
 
 
     @Override
@@ -76,16 +77,27 @@ public class CallReceiver extends BroadcastReceiver {
             if (extraState.equals(TelephonyManager.EXTRA_STATE_OFFHOOK)) {
                 Log.d(TAG, "Setting AlreadyOnCall");
                 AlreadyOnCall = true;
+                numberlessRingCount = 0;
             }
             else if (extraState.equals(TelephonyManager.EXTRA_STATE_IDLE)) {
                 Log.d(TAG, "Clearing AlreadyOnCall");
                 AlreadyOnCall = false;
+                numberlessRingCount = 0;
             } else if (extraState.equals(TelephonyManager.EXTRA_STATE_RINGING)) {
                 String incomingNumber = intent.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER);
                 /* swy: we can receive two notifications; the first one doesn't
                     have EXTRA_INCOMING_NUMBER, so just skip it */
                 if (incomingNumber == null){
-                    return;
+                    /* a hidden caller never gets a number: both notifications come without one,
+                       a normal call gets its number on the second one */
+                    numberlessRingCount++;
+                    boolean canReadNumber = ActivityCompat.checkSelfPermission(context, Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED;
+                    if (numberlessRingCount != 2 || !canReadNumber) {
+                        return;
+                    }
+                    incomingNumber = "";
+                } else {
+                    numberlessRingCount = 0;
                 }
                 CallOutcome outcome = handlingRing(context, incomingNumber);
                 Log.d("my-debug", "has outcome!!!"+outcome.rejected);
